@@ -7,7 +7,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "EyeHealth",
-            path: "Sources/EyeHealth"
+            path: "Sources/EyeHealth",
+            linkerSettings: [
+                .linkedFramework("IOKit")
+            ]
         )
     ]
 )

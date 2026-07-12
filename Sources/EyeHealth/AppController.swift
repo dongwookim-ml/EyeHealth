@@ -2,21 +2,36 @@ import AppKit
 import UserNotifications
 import CoreGraphics
 import ServiceManagement
+import IOKit.ps
 
 /// Menu bar controller that measures continuous screen-watching time and reminds
 /// you to rest your eyes following the 20-20-20 rule.
+///
+/// "Watching" is derived from two signals: recent keyboard/mouse input, and, when
+/// input is idle, the webcam (via `CameraMonitor`) detecting a face facing the
+/// screen. This keeps the timer running while you read a static page without
+/// touching the computer. Camera use follows the power source: continuous while
+/// plugged in, idle-triggered only on battery.
 final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
 
     // MARK: - Configuration (seconds)
 
     /// How long you may watch the screen before a break becomes due.
     private var workInterval: TimeInterval = 20 * 60
-    /// Idle time that counts as a completed eye break (the "20 seconds" of 20-20-20).
+    /// Looking away this long counts as a completed eye break and resets the clock.
     private let breakDuration: TimeInterval = 20
-    /// Idle time that means you stepped away, so the watch timer resets to zero.
-    private let awayThreshold: TimeInterval = 3 * 60
+    /// Idle below this means recent input, so you are clearly at the screen.
+    private let inputActiveThreshold: TimeInterval = 15
     /// If a due break is ignored, remind again after this long.
     private let reNotifyInterval: TimeInterval = 5 * 60
+    /// Grace right after the camera starts, before it has produced a frame.
+    private let cameraWarmup: TimeInterval = 3
+    /// A face detection stays valid for this long after it was last seen.
+    private let faceStale: TimeInterval = 5
+    /// On battery, keep the camera on this long after input resumes (anti-flicker).
+    private let cameraOffDelay: TimeInterval = 3
+    /// Without a camera, treat idle up to this as still watching.
+    private let fallbackAwayThreshold: TimeInterval = 3 * 60
 
     private let intervalChoices = [15, 20, 25, 30, 45, 60]
 
@@ -25,16 +40,28 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
     private enum Mode { case watching, breakDue }
     private var mode: Mode = .watching
     private var watched: TimeInterval = 0
+    private var notLooking: TimeInterval = 0
     private var paused = false
     private var lastTick = Date()
     private var lastNotify = Date(timeIntervalSince1970: 0)
+    private var onAC = true
+
+    private var useCamera = true
+    private let camera = CameraMonitor()
+    private var lastFaceAt = Date(timeIntervalSince1970: 0)
+    private var lastFaceFrontal = false
+    private var cameraStartedAt = Date(timeIntervalSince1970: 0)
+    private var cameraStopPendingSince: Date?
+
     private var hasBundle: Bool { Bundle.main.bundleIdentifier != nil }
 
     // MARK: - UI
 
     private var statusItem: NSStatusItem!
     private var headerItem: NSMenuItem!
+    private var cameraInfoItem: NSMenuItem!
     private var pauseItem: NSMenuItem!
+    private var cameraToggleItem: NSMenuItem!
     private var launchItem: NSMenuItem!
     private var intervalItems: [NSMenuItem] = []
     private var timer: Timer?
@@ -44,9 +71,19 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
     func applicationDidFinishLaunching(_ notification: Notification) {
         let savedMinutes = UserDefaults.standard.integer(forKey: "workIntervalMinutes")
         if savedMinutes > 0 { workInterval = TimeInterval(savedMinutes * 60) }
+        if UserDefaults.standard.object(forKey: "useCamera") != nil {
+            useCamera = UserDefaults.standard.bool(forKey: "useCamera")
+        }
+
+        camera.onResult = { [weak self] facing in
+            guard let self = self else { return }
+            self.lastFaceAt = Date()
+            self.lastFaceFrontal = facing
+        }
 
         setupStatusItem()
         setupNotifications()
+        if useCamera { camera.requestAccess { [weak self] _ in self?.updateUI() } }
 
         lastTick = Date()
         let t = Timer(timeInterval: 1.0, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
@@ -66,34 +103,76 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         if paused { return }
         delta = min(delta, 5) // guard against sleep/wake jumps
 
+        onAC = powerIsAC()
         let idle = systemIdleSeconds()
+        let recentInput = idle < inputActiveThreshold
 
-        switch mode {
-        case .watching:
-            if idle >= awayThreshold {
-                watched = 0 // stepped away; start fresh on return
-            } else {
+        reconcileCamera(recentInput: recentInput, now: now)
+        let looking = isLookingAtScreen(recentInput: recentInput, idle: idle, now: now)
+
+        if looking {
+            notLooking = 0
+            switch mode {
+            case .watching:
                 watched += delta
                 if watched >= workInterval {
                     mode = .breakDue
                     sendBreakNotification()
                 }
+            case .breakDue:
+                if now.timeIntervalSince(lastNotify) >= reNotifyInterval { sendBreakNotification() }
             }
-        case .breakDue:
-            if idle >= breakDuration {
-                mode = .watching // you rested your eyes
+        } else {
+            notLooking += delta
+            if notLooking >= breakDuration {
                 watched = 0
-            } else if now.timeIntervalSince(lastNotify) >= reNotifyInterval {
-                sendBreakNotification()
+                mode = .watching // you rested your eyes
             }
         }
     }
 
-    /// Seconds since the last keyboard/mouse input, system-wide. Requires no permissions.
+    /// True when you are watching the screen: recent input, or the webcam sees a
+    /// face facing the screen while input is idle.
+    private func isLookingAtScreen(recentInput: Bool, idle: TimeInterval, now: Date) -> Bool {
+        if recentInput { return true }
+        if useCamera && camera.isAuthorized && camera.isRunning {
+            if now.timeIntervalSince(cameraStartedAt) < cameraWarmup { return true } // still warming up
+            if now.timeIntervalSince(lastFaceAt) < faceStale { return lastFaceFrontal }
+            return false // camera sees no face facing the screen
+        }
+        return idle < fallbackAwayThreshold // no camera: fall back to idle time
+    }
+
+    /// Starts/stops the camera to match the power-based policy: always on while
+    /// plugged in, only after input goes idle while on battery.
+    private func reconcileCamera(recentInput: Bool, now: Date) {
+        let shouldRun = useCamera && camera.isAuthorized && (onAC || !recentInput)
+        if shouldRun {
+            cameraStopPendingSince = nil
+            if !camera.isRunning {
+                camera.start()
+                cameraStartedAt = now
+            }
+        } else if camera.isRunning {
+            if let since = cameraStopPendingSince {
+                if now.timeIntervalSince(since) >= cameraOffDelay { camera.stop(); cameraStopPendingSince = nil }
+            } else {
+                cameraStopPendingSince = now
+            }
+        }
+    }
+
+    /// Seconds since the last keyboard/mouse input, system-wide. Needs no permission.
     private func systemIdleSeconds() -> TimeInterval {
-        // ~0 (0xFFFFFFFF) is kCGAnyInputEventType: idle time across every input event.
+        // ~0 (0xFFFFFFFF) is kCGAnyInputEventType: idle across every input event.
         let anyInput = CGEventType(rawValue: ~UInt32(0))!
         return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+    }
+
+    private func powerIsAC() -> Bool {
+        let snapshot = IOPSCopyPowerSourcesInfo().takeRetainedValue()
+        guard let type = IOPSGetProvidingPowerSourceType(snapshot)?.takeRetainedValue() as String? else { return true }
+        return type == (kIOPSACPowerValue as String)
     }
 
     // MARK: - Notifications
@@ -140,6 +219,8 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
 
         headerItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         menu.addItem(headerItem)
+        cameraInfoItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        menu.addItem(cameraInfoItem)
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(title: "Reset Timer", action: #selector(resetTimer), keyEquivalent: "r"))
@@ -158,6 +239,9 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         }
         intervalParent.submenu = intervalMenu
         menu.addItem(intervalParent)
+
+        cameraToggleItem = NSMenuItem(title: "Use Camera", action: #selector(toggleUseCamera), keyEquivalent: "")
+        menu.addItem(cameraToggleItem)
 
         menu.addItem(.separator())
 
@@ -199,13 +283,23 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         button.title = " " + title
 
         headerItem.title = header
+        cameraInfoItem.title = cameraStatusText()
         pauseItem.title = paused ? "Resume" : "Pause"
+        cameraToggleItem.state = useCamera ? .on : .off
         for item in intervalItems {
             if let minutes = item.representedObject as? Int {
                 item.state = (Int(workInterval / 60) == minutes) ? .on : .off
             }
         }
         launchItem.state = launchAtLoginEnabled ? .on : .off
+    }
+
+    private func cameraStatusText() -> String {
+        if !useCamera { return "Camera: off (input only)" }
+        if camera.permissionDenied { return "Camera: permission denied" }
+        if !camera.isAuthorized { return "Camera: awaiting permission" }
+        if onAC { return "Camera: always on (plugged in)" }
+        return camera.isRunning ? "Camera: checking (idle)" : "Camera: idle-only (battery)"
     }
 
     private func fmt(_ t: TimeInterval) -> String {
@@ -217,6 +311,7 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
 
     @objc private func resetTimer() {
         watched = 0
+        notLooking = 0
         mode = .watching
         lastTick = Date()
         updateUI()
@@ -237,7 +332,19 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         updateUI()
     }
 
+    @objc private func toggleUseCamera() {
+        useCamera.toggle()
+        UserDefaults.standard.set(useCamera, forKey: "useCamera")
+        if useCamera {
+            camera.requestAccess { [weak self] _ in self?.updateUI() }
+        } else {
+            camera.stop()
+        }
+        updateUI()
+    }
+
     @objc private func quit() {
+        camera.stop()
         NSApp.terminate(nil)
     }
 

@@ -32,6 +32,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
+  <key>NSCameraUsageDescription</key><string>EyeHealth checks whether you are looking at the screen to time your eye breaks. Frames are analyzed on-device and never stored or sent anywhere.</string>
   <key>NSHumanReadableCopyright</key><string>© 2026 Dongwoo Kim</string>
 </dict>
 </plist>
