@@ -12,7 +12,7 @@ import IOKit.ps
 /// screen. This keeps the timer running while you read a static page without
 /// touching the computer. Camera use follows the power source: continuous while
 /// plugged in, idle-triggered only on battery.
-final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, NSMenuDelegate {
 
     // MARK: - Configuration (seconds)
 
@@ -48,10 +48,16 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
 
     private var useCamera = true
     private let camera = CameraMonitor()
-    private var lastFaceAt = Date(timeIntervalSince1970: 0)
-    private var lastFaceFrontal = false
+    private var preferredCameraID: String?
+    private var lastFrameAt = Date(timeIntervalSince1970: 0)
+    private var lastDetection = CameraMonitor.Detection(facePresent: false, frontal: false)
     private var cameraStartedAt = Date(timeIntervalSince1970: 0)
     private var cameraStopPendingSince: Date?
+
+    /// With one display the camera sits in the screen you watch, so head
+    /// orientation is meaningful. With several displays it is not: looking at
+    /// the main external monitor turns your head away from the built-in camera.
+    private var multiDisplay: Bool { NSScreen.screens.count > 1 }
 
     private var hasBundle: Bool { Bundle.main.bundleIdentifier != nil }
 
@@ -60,8 +66,10 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
     private var statusItem: NSStatusItem!
     private var headerItem: NSMenuItem!
     private var cameraInfoItem: NSMenuItem!
+    private var detectionInfoItem: NSMenuItem!
     private var pauseItem: NSMenuItem!
     private var cameraToggleItem: NSMenuItem!
+    private var cameraDeviceMenu: NSMenu!
     private var launchItem: NSMenuItem!
     private var intervalItems: [NSMenuItem] = []
     private var timer: Timer?
@@ -75,10 +83,15 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
             useCamera = UserDefaults.standard.bool(forKey: "useCamera")
         }
 
-        camera.onResult = { [weak self] facing in
+        if let savedCamera = UserDefaults.standard.string(forKey: "cameraDeviceID") {
+            preferredCameraID = savedCamera
+            camera.setPreferredDevice(savedCamera)
+        }
+
+        camera.onResult = { [weak self] detection in
             guard let self = self else { return }
-            self.lastFaceAt = Date()
-            self.lastFaceFrontal = facing
+            self.lastFrameAt = Date()
+            self.lastDetection = detection
         }
 
         setupStatusItem()
@@ -131,14 +144,18 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         }
     }
 
-    /// True when you are watching the screen: recent input, or the webcam sees a
-    /// face facing the screen while input is idle.
+    /// True when you are watching the screen: recent input, or the webcam sees
+    /// you while input is idle. With one display "sees you" means a face facing
+    /// the screen; with several displays any visible face counts, because
+    /// watching the main external monitor turns your head away from the camera.
     private func isLookingAtScreen(recentInput: Bool, idle: TimeInterval, now: Date) -> Bool {
         if recentInput { return true }
         if useCamera && camera.isAuthorized && camera.isRunning {
             if now.timeIntervalSince(cameraStartedAt) < cameraWarmup { return true } // still warming up
-            if now.timeIntervalSince(lastFaceAt) < faceStale { return lastFaceFrontal }
-            return false // camera sees no face facing the screen
+            if now.timeIntervalSince(lastFrameAt) < faceStale {
+                return multiDisplay ? lastDetection.facePresent : lastDetection.frontal
+            }
+            return false // no fresh frame with a face
         }
         return idle < fallbackAwayThreshold // no camera: fall back to idle time
     }
@@ -221,6 +238,8 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         menu.addItem(headerItem)
         cameraInfoItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         menu.addItem(cameraInfoItem)
+        detectionInfoItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        menu.addItem(detectionInfoItem)
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(title: "Reset Timer", action: #selector(resetTimer), keyEquivalent: "r"))
@@ -242,6 +261,12 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
 
         cameraToggleItem = NSMenuItem(title: "Use Camera", action: #selector(toggleUseCamera), keyEquivalent: "")
         menu.addItem(cameraToggleItem)
+
+        let deviceParent = NSMenuItem(title: "Camera Device", action: nil, keyEquivalent: "")
+        cameraDeviceMenu = NSMenu()
+        cameraDeviceMenu.delegate = self // repopulated on open
+        deviceParent.submenu = cameraDeviceMenu
+        menu.addItem(deviceParent)
 
         menu.addItem(.separator())
 
@@ -284,6 +309,7 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
 
         headerItem.title = header
         cameraInfoItem.title = cameraStatusText()
+        detectionInfoItem.title = detectionModeText()
         pauseItem.title = paused ? "Resume" : "Pause"
         cameraToggleItem.state = useCamera ? .on : .off
         for item in intervalItems {
@@ -300,6 +326,42 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         if !camera.isAuthorized { return "Camera: awaiting permission" }
         if onAC { return "Camera: always on (plugged in)" }
         return camera.isRunning ? "Camera: checking (idle)" : "Camera: idle-only (battery)"
+    }
+
+    private func detectionModeText() -> String {
+        guard useCamera && camera.isAuthorized else { return "Detection: input only" }
+        return multiDisplay ? "Detection: any visible face (multi-display)"
+                            : "Detection: face facing screen"
+    }
+
+    // MARK: - Camera device picker
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu == cameraDeviceMenu else { return }
+        menu.removeAllItems()
+
+        let auto = NSMenuItem(title: "Automatic", action: #selector(selectCameraDevice(_:)), keyEquivalent: "")
+        auto.target = self
+        auto.state = (preferredCameraID == nil) ? .on : .off
+        menu.addItem(auto)
+
+        for cam in CameraMonitor.availableCameras() {
+            let item = NSMenuItem(title: cam.name, action: #selector(selectCameraDevice(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = cam.id
+            item.state = (preferredCameraID == cam.id) ? .on : .off
+            menu.addItem(item)
+        }
+    }
+
+    @objc private func selectCameraDevice(_ sender: NSMenuItem) {
+        preferredCameraID = sender.representedObject as? String
+        if let id = preferredCameraID {
+            UserDefaults.standard.set(id, forKey: "cameraDeviceID")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "cameraDeviceID")
+        }
+        camera.setPreferredDevice(preferredCameraID)
     }
 
     private func fmt(_ t: TimeInterval) -> String {

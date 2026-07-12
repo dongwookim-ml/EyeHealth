@@ -11,11 +11,27 @@ rest your eyes, following the **20-20-20 rule**: every 20 minutes, look about
   input-idle timer. No camera and no accessibility permission are required.
 - When the interval is up it posts a notification with a sound telling you to
   look away.
-- It notices when you actually rest:
-  - **20 seconds** of no keyboard/mouse input clears a due break.
-  - **3 minutes** of no input means you stepped away, so the timer resets and
-    starts fresh when you come back.
+- When input is idle, the webcam checks whether you are still watching
+  (on-device Vision face detection; frames are analyzed and discarded, never
+  stored or sent anywhere). Reading a static page without touching the
+  computer still counts as screen time.
+- Camera use follows the power source: continuous while plugged in,
+  idle-triggered only on battery.
+- Looking away (no input and no face) for **20 seconds** counts as an eye
+  break and resets the clock.
 - If a due break is ignored, it reminds you again after 5 minutes.
+
+## Multiple displays
+
+- With one display, a face is counted as watching only when it roughly faces
+  the screen (head yaw within about 40 degrees of the camera).
+- With two or more displays, any visible face counts as watching, because
+  looking at an external main monitor turns your head away from the built-in
+  camera. This switches automatically when displays connect or disconnect.
+- If you work in clamshell mode (lid closed), the built-in camera sees
+  nothing. Attach an external webcam to your main monitor and select it under
+  **Camera Device** in the menu. Without one, keyboard/mouse input still
+  counts as watching, but reading without input cannot be detected.
 
 ## Menu
 
@@ -23,6 +39,9 @@ rest your eyes, following the **20-20-20 rule**: every 20 minutes, look about
 - **Reset Timer** — start the current interval over.
 - **Pause / Resume** — stop and resume tracking.
 - **Break Interval** — choose 15, 20, 25, 30, 45, or 60 minutes.
+- **Use Camera** — toggle webcam presence detection (off = input only).
+- **Camera Device** — pick which camera to use (e.g. an external webcam on
+  your main monitor).
 - **Open at Login** — launch EyeHealth automatically when you log in.
 - **Quit EyeHealth**.
 

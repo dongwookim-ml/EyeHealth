@@ -2,18 +2,26 @@ import AVFoundation
 import Vision
 import CoreMedia
 
-/// Uses the webcam + Vision to detect whether a face roughly facing the screen
-/// is present. All processing is on-device; frames are analyzed and discarded,
-/// never stored or transmitted.
+/// Uses a camera + Vision to detect whether a face is visible and whether it
+/// roughly faces the camera. All processing is on-device; frames are analyzed
+/// and discarded, never stored or transmitted.
 final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
-    /// Called on the main thread after each analyzed frame. `true` means a face
-    /// roughly facing the screen was seen.
-    var onResult: ((Bool) -> Void)?
+    struct Detection {
+        /// A face is visible to the camera.
+        let facePresent: Bool
+        /// At least one visible face is within ~40 degrees of facing the camera.
+        let frontal: Bool
+    }
+
+    /// Called on the main thread after each analyzed frame.
+    var onResult: ((Detection) -> Void)?
 
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "com.dongwookim.eyehealth.camera")
-    private var configured = false
+    private var currentInput: AVCaptureDeviceInput?
+    private var outputAdded = false
+    private var preferredDeviceID: String? // queue-confined
     private var lastProcessed = Date(timeIntervalSince1970: 0)
     private let minFrameInterval: TimeInterval = 1.0 // analyze ~1 frame/sec
 
@@ -29,6 +37,17 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         return status == .denied || status == .restricted
     }
 
+    /// Connected cameras, for the device-picker menu.
+    static func availableCameras() -> [(id: String, name: String)] {
+        var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+        if #available(macOS 14.0, *) {
+            types.append(.external)
+            types.append(.continuityCamera)
+        }
+        let discovery = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .unspecified)
+        return discovery.devices.map { ($0.uniqueID, $0.localizedName) }
+    }
+
     func requestAccess(_ completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -42,12 +61,23 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
+    /// Selects the camera to use (nil = system default). Takes effect
+    /// immediately if the session is running.
+    func setPreferredDevice(_ id: String?) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.preferredDeviceID = id
+            if self.session.isRunning { self.configure() }
+        }
+    }
+
     func start() {
         guard !isRunning, isAuthorized else { return }
         isRunning = true
         queue.async { [weak self] in
-            guard let self = self, self.configureIfNeeded() else { return }
-            if !self.session.isRunning { self.session.startRunning() }
+            guard let self = self else { return }
+            self.configure()
+            if self.currentInput != nil, !self.session.isRunning { self.session.startRunning() }
         }
     }
 
@@ -62,23 +92,43 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     // MARK: - Private
 
-    private func configureIfNeeded() -> Bool {
-        if configured { return true }
-        guard let device = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: device) else { return false }
-
+    /// Ensures the session has the frame output and an input matching the
+    /// preferred device. Runs on `queue`.
+    private func configure() {
         session.beginConfiguration()
-        session.sessionPreset = session.canSetSessionPreset(.low) ? .low : .medium
-        if session.canAddInput(input) { session.addInput(input) }
+        defer { session.commitConfiguration() }
 
-        let output = AVCaptureVideoDataOutput()
-        output.alwaysDiscardsLateVideoFrames = true
-        output.setSampleBufferDelegate(self, queue: queue)
-        if session.canAddOutput(output) { session.addOutput(output) }
+        if !outputAdded {
+            session.sessionPreset = session.canSetSessionPreset(.low) ? .low : .medium
+            let output = AVCaptureVideoDataOutput()
+            output.alwaysDiscardsLateVideoFrames = true
+            output.setSampleBufferDelegate(self, queue: queue)
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+                outputAdded = true
+            }
+        }
 
-        session.commitConfiguration()
-        configured = true
-        return true
+        let wanted = resolveDevice()
+        if currentInput?.device.uniqueID != wanted?.uniqueID {
+            if let old = currentInput {
+                session.removeInput(old)
+                currentInput = nil
+            }
+            if let device = wanted,
+               let input = try? AVCaptureDeviceInput(device: device),
+               session.canAddInput(input) {
+                session.addInput(input)
+                currentInput = input
+            }
+        }
+    }
+
+    private func resolveDevice() -> AVCaptureDevice? {
+        if let id = preferredDeviceID, let device = AVCaptureDevice(uniqueID: id) {
+            return device
+        }
+        return AVCaptureDevice.default(for: .video)
     }
 
     func captureOutput(_ output: AVCaptureOutput,
@@ -96,13 +146,15 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
         guard (try? handler.perform([request])) != nil else { return }
 
-        let facing = (request.results ?? []).contains { observation in
+        let faces = request.results ?? []
+        let frontal = faces.contains { observation in
             if let yaw = observation.yaw?.doubleValue {
-                return abs(yaw) <= 0.7 // within ~40 degrees of facing the screen
+                return abs(yaw) <= 0.7 // within ~40 degrees of facing the camera
             }
             return true // face present, orientation unavailable
         }
+        let detection = Detection(facePresent: !faces.isEmpty, frontal: frontal)
 
-        DispatchQueue.main.async { [weak self] in self?.onResult?(facing) }
+        DispatchQueue.main.async { [weak self] in self?.onResult?(detection) }
     }
 }
