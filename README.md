@@ -56,8 +56,11 @@ Requires the Xcode Command Line Tools (Swift 5.9+). No full Xcode needed.
 open dist/EyeHealth.app
 ```
 
-`build.sh` compiles with Swift Package Manager, assembles `dist/EyeHealth.app`,
-and ad-hoc code-signs it.
+`build.sh` compiles with Swift Package Manager, assembles `dist/EyeHealth.app`
+with the bundled bloodshot-eye icon (`Resources/EyeHealth.icns`), and ad-hoc
+code-signs it. The icon is drawn programmatically; regenerate it with
+`swift scripts/make_icon.swift icon_1024.png` and rebuild the icns via
+`iconutil` if you change the artwork.
 
 On first launch macOS asks for notification permission. Click **Allow** so the
 break reminders can appear.
