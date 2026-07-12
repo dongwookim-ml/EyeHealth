@@ -64,6 +64,8 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
     // MARK: - UI
 
     private var statusItem: NSStatusItem!
+    private var infoWindow: NSWindow?
+    private var infoTextView: NSTextView?
     private var headerItem: NSMenuItem!
     private var cameraInfoItem: NSMenuItem!
     private var detectionInfoItem: NSMenuItem!
@@ -270,6 +272,8 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
 
         menu.addItem(.separator())
 
+        menu.addItem(NSMenuItem(title: "How EyeHealth Works…", action: #selector(showInfo), keyEquivalent: ""))
+
         launchItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         menu.addItem(launchItem)
 
@@ -408,6 +412,101 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
     @objc private func quit() {
         camera.stop()
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Info panel
+
+    @objc private func showInfo() {
+        if infoWindow == nil { buildInfoWindow() }
+        infoTextView?.textStorage?.setAttributedString(infoText())
+        infoWindow?.center()
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        infoWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func buildInfoWindow() {
+        let scroll = NSTextView.scrollableTextView()
+        scroll.frame = NSRect(x: 0, y: 0, width: 500, height: 620)
+        scroll.hasVerticalScroller = true
+        let text = scroll.documentView as? NSTextView
+        text?.isEditable = false
+        text?.textContainerInset = NSSize(width: 20, height: 16)
+
+        let window = NSWindow(contentRect: scroll.frame,
+                              styleMask: [.titled, .closable, .resizable],
+                              backing: .buffered,
+                              defer: false)
+        window.title = "How EyeHealth Works"
+        window.isReleasedWhenClosed = false
+        window.contentView = scroll
+
+        infoWindow = window
+        infoTextView = text
+    }
+
+    /// Explainer text, rebuilt on each open so it reflects the current interval.
+    private func infoText() -> NSAttributedString {
+        let minutes = Int(workInterval / 60)
+
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 2
+        para.paragraphSpacing = 6
+        let head: [NSAttributedString.Key: Any] = [
+            .font: NSFont.boldSystemFont(ofSize: 14),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: para,
+        ]
+        let body: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: para,
+        ]
+
+        let result = NSMutableAttributedString()
+        func section(_ title: String, _ content: String) {
+            result.append(NSAttributedString(string: title + "\n", attributes: head))
+            result.append(NSAttributedString(string: content + "\n\n", attributes: body))
+        }
+
+        section("The 20-20-20 rule",
+                "Every \(minutes) minutes of screen time, look at something about 20 feet (6 m) away "
+                + "for 20 seconds. EyeHealth times this for you and notifies you when a break is due.")
+
+        section("How watching is detected",
+                "Recent keyboard or mouse input counts as watching. When input goes idle, the webcam "
+                + "checks whether your face is still at the screen, so reading a paper without touching "
+                + "the computer still counts. The Detection line in the menu shows which mode is active.")
+
+        section("How rest is detected",
+                "Look away from the screen for 20 continuous seconds and the timer resets to zero "
+                + "automatically, at any point in the cycle. Stepping away works too. If you ignore a "
+                + "due break, EyeHealth reminds you again every 5 minutes.")
+
+        section("Camera and battery",
+                "Plugged in, the camera stays on for the most accurate tracking. On battery, it wakes "
+                + "only after about 15 seconds without input, then turns back off once you type again. "
+                + "The green camera light shows when it is active.")
+
+        section("Multiple displays",
+                "With one display, watching means your head roughly faces the screen, within about "
+                + "40 degrees. With several displays, any visible face counts, because looking at an "
+                + "external main monitor turns your head away from the built-in camera. In clamshell "
+                + "mode, select an external webcam under Camera Device.")
+
+        section("Privacy",
+                "All face detection runs on this Mac using Apple's Vision framework. Frames are "
+                + "analyzed and immediately discarded. Nothing is recorded, stored, or sent anywhere.")
+
+        section("Without the camera",
+                "If the camera is off or not permitted, EyeHealth falls back to input only: you count "
+                + "as watching until 3 minutes pass without input, so short pauses are not mistaken "
+                + "for breaks.")
+
+        return result
     }
 
     // MARK: - Open at login

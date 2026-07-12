@@ -42,6 +42,8 @@ rest your eyes, following the **20-20-20 rule**: every 20 minutes, look about
 - **Use Camera** — toggle webcam presence detection (off = input only).
 - **Camera Device** — pick which camera to use (e.g. an external webcam on
   your main monitor).
+- **How EyeHealth Works…** — opens an explainer panel describing detection,
+  camera policy, multi-display behavior, and privacy.
 - **Open at Login** — launch EyeHealth automatically when you log in.
 - **Quit EyeHealth**.
 
