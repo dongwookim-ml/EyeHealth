@@ -50,7 +50,8 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
     private let camera = CameraMonitor()
     private var preferredCameraID: String?
     private var lastFrameAt = Date(timeIntervalSince1970: 0)
-    private var lastDetection = CameraMonitor.Detection(facePresent: false, frontal: false)
+    private var lastDetection = CameraMonitor.Detection(facePresent: false, frontal: false, eyesOpen: true)
+    private var lastEnhanced: Bool?
     private var cameraStartedAt = Date(timeIntervalSince1970: 0)
     private var cameraStopPendingSince: Date?
 
@@ -119,6 +120,10 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         delta = min(delta, 5) // guard against sleep/wake jumps
 
         onAC = powerIsAC()
+        if lastEnhanced != onAC {
+            camera.setEnhanced(onAC) // richer analysis while plugged in
+            lastEnhanced = onAC
+        }
         let idle = systemIdleSeconds()
         let recentInput = idle < inputActiveThreshold
 
@@ -155,7 +160,8 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         if useCamera && camera.isAuthorized && camera.isRunning {
             if now.timeIntervalSince(cameraStartedAt) < cameraWarmup { return true } // still warming up
             if now.timeIntervalSince(lastFrameAt) < faceStale {
-                return multiDisplay ? lastDetection.facePresent : lastDetection.frontal
+                let attentive = multiDisplay ? lastDetection.facePresent : lastDetection.frontal
+                return attentive && lastDetection.eyesOpen // closed eyes = resting
             }
             return false // no fresh frame with a face
         }
@@ -334,6 +340,10 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
 
     private func detectionModeText() -> String {
         guard useCamera && camera.isAuthorized else { return "Detection: input only" }
+        if onAC {
+            return multiDisplay ? "Detection: presence + eye openness (plugged in)"
+                                : "Detection: head pose + eyes + gaze (plugged in)"
+        }
         return multiDisplay ? "Detection: any visible face (multi-display)"
                             : "Detection: face facing screen"
     }
@@ -483,12 +493,15 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
 
         section("How rest is detected",
                 "Look away from the screen for 20 continuous seconds and the timer resets to zero "
-                + "automatically, at any point in the cycle. Stepping away works too. If you ignore a "
-                + "due break, EyeHealth reminds you again every 5 minutes.")
+                + "automatically, at any point in the cycle. Stepping away works too, and while "
+                + "plugged in, closing your eyes for 20 seconds also counts. If you ignore a due "
+                + "break, EyeHealth reminds you again every 5 minutes.")
 
         section("Camera and battery",
-                "Plugged in, the camera stays on for the most accurate tracking. On battery, it wakes "
-                + "only after about 15 seconds without input, then turns back off once you type again. "
+                "Plugged in, the camera stays on and tracks you more closely: head pose (including "
+                + "looking down at a phone), eye openness, and coarse gaze from pupil position, at "
+                + "2 frames per second. On battery, a lighter head-pose check runs only after about "
+                + "15 seconds without input, then the camera turns back off once you type again. "
                 + "The green camera light shows when it is active.")
 
         section("Multiple displays",

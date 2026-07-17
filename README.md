@@ -15,8 +15,11 @@ rest your eyes, following the **20-20-20 rule**: every 20 minutes, look about
   (on-device Vision face detection; frames are analyzed and discarded, never
   stored or sent anywhere). Reading a static page without touching the
   computer still counts as screen time.
-- Camera use follows the power source: continuous while plugged in,
-  idle-triggered only on battery.
+- Camera use follows the power source. Plugged in, it runs continuously and
+  tracks more actively: head pose including pitch, eye openness (closing your
+  eyes for 20 seconds counts as a break), and coarse gaze from pupil position,
+  at 2 frames per second. On battery, a lighter face/head-pose check runs only
+  while input is idle, at 1 frame per second.
 - Looking away (no input and no face) for **20 seconds** counts as an eye
   break and resets the clock.
 - If a due break is ignored, it reminds you again after 5 minutes.
