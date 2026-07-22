@@ -145,6 +145,11 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         } else {
             notLooking += delta
             if notLooking >= breakDuration {
+                // Chime once per reset, and only when it mattered: a due break
+                // completed, or a meaningful stretch of watching was cleared.
+                if mode == .breakDue || watched >= 60 {
+                    sendRestCompleteNotification()
+                }
                 watched = 0
                 mode = .watching // you rested your eyes
             }
@@ -221,6 +226,17 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         content.title = "Time to rest your eyes"
         content.body = "You've watched the screen for \(Int(workInterval / 60)) minutes. "
             + "Look about 20 feet (6 m) away for 20 seconds."
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private func sendRestCompleteNotification() {
+        NSSound(named: "Hero")?.play()
+
+        guard hasBundle else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Eyes rested, timer reset"
+        content.body = "Nice break. Fresh \(Int(workInterval / 60)) minutes on the clock."
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
@@ -494,8 +510,9 @@ final class AppController: NSObject, NSApplicationDelegate, UNUserNotificationCe
         section("How rest is detected",
                 "Look away from the screen for 20 continuous seconds and the timer resets to zero "
                 + "automatically, at any point in the cycle. Stepping away works too, and while "
-                + "plugged in, closing your eyes for 20 seconds also counts. If you ignore a due "
-                + "break, EyeHealth reminds you again every 5 minutes.")
+                + "plugged in, closing your eyes for 20 seconds also counts. When the rest "
+                + "completes, a chime and a notification confirm the reset, so you know you can "
+                + "look back. If you ignore a due break, EyeHealth reminds you again every 5 minutes.")
 
         section("Camera and battery",
                 "Plugged in, the camera stays on and tracks you more closely: head pose (including "

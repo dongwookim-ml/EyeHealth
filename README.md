@@ -21,7 +21,8 @@ rest your eyes, following the **20-20-20 rule**: every 20 minutes, look about
   at 2 frames per second. On battery, a lighter face/head-pose check runs only
   while input is idle, at 1 frame per second.
 - Looking away (no input and no face) for **20 seconds** counts as an eye
-  break and resets the clock.
+  break and resets the clock. A chime and a notification confirm the reset,
+  so a rest with closed eyes ends on the sound cue.
 - If a due break is ignored, it reminds you again after 5 minutes.
 
 ## Multiple displays
